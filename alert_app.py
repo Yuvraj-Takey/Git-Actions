@@ -188,7 +188,14 @@ def _validate_config(config):
         )
 
 
-logging.basicConfig(filename=LOG_FILE_PATH, level=LOG_LEVEL)
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE_PATH, encoding='utf-8'),
+        logging.StreamHandler(),
+    ],
+)
 
 
 def send_telegram_alert(config, message):
@@ -334,7 +341,9 @@ def main():
         manual_test_message = config['manual_test_template'].format(
             timestamp=now.strftime(TIMESTAMP_FORMAT),
         )
-        send_telegram_alert(config, manual_test_message)
+        sent = send_telegram_alert(config, manual_test_message)
+        if not sent:
+            raise RuntimeError('Manual test mode failed: Telegram message was not delivered. Check logs for API error details.')
         logging.info('Manual test mode processed.')
         return
 
