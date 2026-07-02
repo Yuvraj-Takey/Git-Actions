@@ -1,0 +1,7 @@
+# ─── NEVER commit these to Git ───────────────────────────────────────────────
+.env              # local credentials – use .env.example as the committed template
+*.log             # runtime log files
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

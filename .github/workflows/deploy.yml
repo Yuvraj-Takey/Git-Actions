@@ -1,0 +1,60 @@
+name: Deploy Python Application
+
+on:
+  workflow_dispatch:
+    inputs:
+      manual_test_mode:
+        description: 'Send immediate Telegram test signal and exit (bypasses window checks)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  schedule:
+    # UTC schedules:
+    # 08:00 -> startup signal
+    - cron: '0 8 * * *'
+    # 09:30, 10:30, ..., 15:30 -> hourly alerts
+    - cron: '30 9-15 * * *'
+    # 16:00 -> daily summary
+    - cron: '0 16 * * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run application
+      # GitHub Secrets are injected as environment variables here.
+      # Add each secret in: GitHub repo → Settings → Secrets and variables → Actions
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        ALERT_INTERVAL_MINUTES: ${{ secrets.ALERT_INTERVAL_MINUTES }}
+        ALERT_WINDOW_START_TIME: ${{ secrets.ALERT_WINDOW_START_TIME }}
+        ALERT_WINDOW_END_TIME: ${{ secrets.ALERT_WINDOW_END_TIME }}
+        EXECUTION_START_TIME: ${{ secrets.EXECUTION_START_TIME }}
+        EXECUTION_STOP_TIME: ${{ secrets.EXECUTION_STOP_TIME }}
+        STARTUP_SIGNAL_TEMPLATE: ${{ secrets.STARTUP_SIGNAL_TEMPLATE }}
+        ALERT_MESSAGE_TEMPLATE: ${{ secrets.ALERT_MESSAGE_TEMPLATE }}
+        SUMMARY_SUBJECT_TEMPLATE: ${{ secrets.SUMMARY_SUBJECT_TEMPLATE }}
+        MANUAL_TEST_MODE: ${{ github.event.inputs.manual_test_mode || secrets.MANUAL_TEST_MODE }}
+        MANUAL_TEST_MESSAGE_TEMPLATE: ${{ secrets.MANUAL_TEST_MESSAGE_TEMPLATE }}
+      run: |
+        python alert_app.py
