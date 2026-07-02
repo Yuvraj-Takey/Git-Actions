@@ -57,4 +57,17 @@ jobs:
         MANUAL_TEST_MODE: ${{ github.event.inputs.manual_test_mode || secrets.MANUAL_TEST_MODE }}
         MANUAL_TEST_MESSAGE_TEMPLATE: ${{ secrets.MANUAL_TEST_MESSAGE_TEMPLATE }}
       run: |
-        python alert_app.py
+        python -u alert_app.py
+
+    - name: Show app log
+      if: always()
+      run: |
+        if [ -f alert.log ]; then
+          echo "--- alert.log ---"
+          cat alert.log
+        else
+          echo "alert.log not found"
+        fi
+
+
+
