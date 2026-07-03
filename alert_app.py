@@ -5,6 +5,7 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 # Load environment values from local .env for local runs.
@@ -25,6 +26,7 @@ CFG_ALERT_INTERVAL_MINUTES = 'ALERT_INTERVAL_MINUTES'
 CFG_MANUAL_TEST_MODE = 'MANUAL_TEST_MODE'
 CFG_LOCAL_CONTINUOUS_MODE = 'LOCAL_CONTINUOUS_MODE'
 CFG_LOCAL_LOOP_SLEEP_SECONDS = 'LOCAL_LOOP_SLEEP_SECONDS'
+CFG_DISPLAY_TIMEZONE = 'DISPLAY_TIMEZONE'
 
 # Backward compatibility keys (hour-only values from previous version)
 CFG_OLD_EXECUTION_START_HOUR = 'EXECUTION_START_HOUR'
@@ -41,12 +43,15 @@ DEFAULT_ALERT_WINDOW_END_TIME = '15:30'
 DEFAULT_ALERT_INTERVAL_MINUTES = 60
 DEFAULT_LOCAL_CONTINUOUS_MODE = False
 DEFAULT_LOCAL_LOOP_SLEEP_SECONDS = 5
+DEFAULT_DISPLAY_TIMEZONE = 'Asia/Kolkata'
 
 # Text templates (configurable words/macros)
 CFG_STARTUP_SIGNAL_TEMPLATE = 'STARTUP_SIGNAL_TEMPLATE'
 CFG_ALERT_MESSAGE_TEMPLATE = 'ALERT_MESSAGE_TEMPLATE'
 CFG_SUMMARY_SUBJECT_TEMPLATE = 'SUMMARY_SUBJECT_TEMPLATE'
 CFG_MANUAL_TEST_MESSAGE_TEMPLATE = 'MANUAL_TEST_MESSAGE_TEMPLATE'
+CFG_NOTIFY_ON_EACH_RUN_START = 'NOTIFY_ON_EACH_RUN_START'
+CFG_RUN_START_MESSAGE_TEMPLATE = 'RUN_START_MESSAGE_TEMPLATE'
 
 DEFAULT_STARTUP_SIGNAL_TEMPLATE = (
     '✅ Alert app started at {timestamp} | execution window: {execution_start}-{execution_stop} | '
@@ -55,6 +60,8 @@ DEFAULT_STARTUP_SIGNAL_TEMPLATE = (
 DEFAULT_ALERT_MESSAGE_TEMPLATE = 'Alert at {timestamp}'
 DEFAULT_SUMMARY_SUBJECT_TEMPLATE = 'Daily Alert Summary - {date}'
 DEFAULT_MANUAL_TEST_MESSAGE_TEMPLATE = '🧪 Manual test signal at {timestamp} (window checks bypassed)'
+DEFAULT_NOTIFY_ON_EACH_RUN_START = False
+DEFAULT_RUN_START_MESSAGE_TEMPLATE = '🚀 Alert app run started at {timestamp}'
 
 # Logging and network settings
 LOG_FILE_PATH = 'alert.log'
@@ -151,8 +158,13 @@ def _load_config():
         'summary_subject_template': _env(CFG_SUMMARY_SUBJECT_TEMPLATE, DEFAULT_SUMMARY_SUBJECT_TEMPLATE),
         'manual_test_mode': _to_bool(_env(CFG_MANUAL_TEST_MODE, 'false')),
         'manual_test_template': _env(CFG_MANUAL_TEST_MESSAGE_TEMPLATE, DEFAULT_MANUAL_TEST_MESSAGE_TEMPLATE),
+        'notify_on_each_run_start': _to_bool(
+            _env(CFG_NOTIFY_ON_EACH_RUN_START, str(DEFAULT_NOTIFY_ON_EACH_RUN_START))
+        ),
+        'run_start_template': _env(CFG_RUN_START_MESSAGE_TEMPLATE, DEFAULT_RUN_START_MESSAGE_TEMPLATE),
         'local_continuous_mode': _to_bool(_env(CFG_LOCAL_CONTINUOUS_MODE, str(DEFAULT_LOCAL_CONTINUOUS_MODE))),
         'local_loop_sleep_seconds': int(_env(CFG_LOCAL_LOOP_SLEEP_SECONDS, str(DEFAULT_LOCAL_LOOP_SLEEP_SECONDS))),
+        'display_timezone': _env(CFG_DISPLAY_TIMEZONE, DEFAULT_DISPLAY_TIMEZONE),
     }
 
 
@@ -175,6 +187,11 @@ def _validate_config(config):
 
     if config['local_loop_sleep_seconds'] <= 0:
         raise ValueError(f'{CFG_LOCAL_LOOP_SLEEP_SECONDS} must be greater than 0')
+
+    try:
+        ZoneInfo(config['display_timezone'])
+    except Exception as exc:
+        raise ValueError(f"Invalid {CFG_DISPLAY_TIMEZONE}: {config['display_timezone']}") from exc
 
     execution_start_min = _minutes_since_midnight(config['execution_start'])
     execution_stop_min = _minutes_since_midnight(config['execution_stop'])
@@ -263,6 +280,14 @@ def _build_daily_summary(config, run_date):
     return summary_slots
 
 
+def _display_datetime(now_utc, config):
+    return now_utc.astimezone(ZoneInfo(config['display_timezone']))
+
+
+def _display_timestamp(now_utc, config):
+    return _display_datetime(now_utc, config).strftime(TIMESTAMP_FORMAT)
+
+
 def _process_scheduled_logic(config, now):
     """Process one UTC timestamp and execute at most one action."""
     now_time = now.time()
@@ -278,7 +303,7 @@ def _process_scheduled_logic(config, now):
 
     if now_time == execution_start:
         startup_message = config['startup_template'].format(
-            timestamp=now.strftime(TIMESTAMP_FORMAT),
+            timestamp=_display_timestamp(now, config),
             execution_start=execution_start.strftime(TIME_FORMAT),
             execution_stop=execution_stop.strftime(TIME_FORMAT),
             alert_start=alert_start.strftime(TIME_FORMAT),
@@ -289,9 +314,9 @@ def _process_scheduled_logic(config, now):
         return
 
     if now_time == execution_stop:
-        summary_messages = _build_daily_summary(config, now.date())
+        summary_messages = _build_daily_summary(config, _display_datetime(now, config).date())
         logging.info('Execution stop time reached; sending daily summary if configured.')
-        send_daily_summary(config, summary_messages, now.date())
+        send_daily_summary(config, summary_messages, _display_datetime(now, config).date())
         return
 
     if _is_inclusive_window(now_time, alert_start, alert_end) and _is_alert_slot(
@@ -299,7 +324,7 @@ def _process_scheduled_logic(config, now):
         alert_start,
         config['interval_minutes'],
     ):
-        alert_message = config['alert_template'].format(timestamp=now.strftime(TIMESTAMP_FORMAT))
+        alert_message = config['alert_template'].format(timestamp=_display_timestamp(now, config))
         send_telegram_alert(config, alert_message)
         logging.info('Alert slot processed.')
         return
@@ -332,14 +357,16 @@ def main():
 
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
 
-    execution_start = config['execution_start']
-    execution_stop = config['execution_stop']
-    alert_start = config['alert_start']
-    alert_end = config['alert_end']
+    if config['notify_on_each_run_start'] and not config['manual_test_mode']:
+        run_start_message = config['run_start_template'].format(
+            timestamp=_display_timestamp(now, config),
+        )
+        send_telegram_alert(config, run_start_message)
+        logging.info('Run-start signal processed.')
 
     if config['manual_test_mode']:
         manual_test_message = config['manual_test_template'].format(
-            timestamp=now.strftime(TIMESTAMP_FORMAT),
+            timestamp=_display_timestamp(now, config),
         )
         sent = send_telegram_alert(config, manual_test_message)
         if not sent:
@@ -355,5 +382,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

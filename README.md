@@ -50,8 +50,13 @@ All sensitive values (bot token, chat ID, email password) are stored **outside t
 | `STARTUP_SIGNAL_TEMPLATE` | Optional | built-in default | Startup message template (`{timestamp}`, `{execution_start}`, `{execution_stop}`, `{alert_start}`, `{alert_end}`) |
 | `ALERT_MESSAGE_TEMPLATE` | Optional | built-in default | Alert message template (`{timestamp}`) |
 | `SUMMARY_SUBJECT_TEMPLATE` | Optional | built-in default | Email summary subject template (`{date}`) |
+| `DISPLAY_TIMEZONE` | Optional | `Asia/Kolkata` | Timezone used in message timestamps (example: `Asia/Kolkata`) |
 | `MANUAL_TEST_MODE` | Optional | `false` | When `true`, sends immediate test Telegram signal and exits |
 | `MANUAL_TEST_MESSAGE_TEMPLATE` | Optional | built-in default | Manual test message template (`{timestamp}`) |
+| `NOTIFY_ON_EACH_RUN_START` | Optional | `false` | When `true`, sends a Telegram message at the start of every run (useful to confirm deployment/run trigger) |
+| `RUN_START_MESSAGE_TEMPLATE` | Optional | built-in default | Run-start message template (`{timestamp}`) |
+| `LOCAL_CONTINUOUS_MODE` | Optional | `false` | For local runs only: keep process alive and evaluate schedule continuously |
+| `LOCAL_LOOP_SLEEP_SECONDS` | Optional | `5` | Local loop polling interval in seconds |
 
 At runtime the app decides whether the current scheduled run is an alert slot or the end-of-day summary slot.
 
@@ -70,6 +75,8 @@ At runtime the app decides whether the current scheduled run is an alert slot or
 7. Confirm the run logs and check Telegram for the startup signal.
 
 For immediate manual testing, run workflow with `manual_test_mode=true` in the workflow dispatch form.
+
+For local continuous testing, set `LOCAL_CONTINUOUS_MODE=true` in [.env](github_actions/.env), then run [github_actions/alert_app.py](github_actions/alert_app.py). Stop with `Ctrl+C`.
 
 ---
 
@@ -124,8 +131,13 @@ GitHub Actions reads credentials from **Secrets**, not from `.env`.
     | `STARTUP_SIGNAL_TEMPLATE` | optional message template |
     | `ALERT_MESSAGE_TEMPLATE` | optional message template |
     | `SUMMARY_SUBJECT_TEMPLATE` | optional message template |
+    | `DISPLAY_TIMEZONE` | e.g. `Asia/Kolkata` |
     | `MANUAL_TEST_MODE` | `true` / `false` |
     | `MANUAL_TEST_MESSAGE_TEMPLATE` | optional message template |
+    | `NOTIFY_ON_EACH_RUN_START` | `true` / `false` |
+    | `RUN_START_MESSAGE_TEMPLATE` | optional message template |
+    | `LOCAL_CONTINUOUS_MODE` | `true` / `false` (local only) |
+    | `LOCAL_LOOP_SLEEP_SECONDS` | polling seconds (local only) |
 
 > 💡 For Gmail, use an **App Password** (not your account password):
 > Google Account → Security → 2-Step Verification → App passwords.
@@ -163,4 +175,5 @@ Default cron timing is configured as:
 - **Telegram not working** – Test your bot token/chat ID with: `https://api.telegram.org/botYOUR_TOKEN/getUpdates`
 - **Logs** – Alerts are logged to `alert.log` (excluded from Git by `.gitignore`).
 - **GitHub Actions logs** – Go to repo → **Actions** tab → click a workflow run → expand each step.
+- **Downloaded app log** – In the same run page, download artifact named `alert-log`.
 - **Daily summary** – At the end hour, the app creates a summary from the configured alert schedule and sends it by email when email secrets are provided.

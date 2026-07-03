@@ -56,6 +56,9 @@ jobs:
         SUMMARY_SUBJECT_TEMPLATE: ${{ secrets.SUMMARY_SUBJECT_TEMPLATE }}
         MANUAL_TEST_MODE: ${{ github.event.inputs.manual_test_mode || secrets.MANUAL_TEST_MODE }}
         MANUAL_TEST_MESSAGE_TEMPLATE: ${{ secrets.MANUAL_TEST_MESSAGE_TEMPLATE }}
+        NOTIFY_ON_EACH_RUN_START: ${{ secrets.NOTIFY_ON_EACH_RUN_START }}
+        RUN_START_MESSAGE_TEMPLATE: ${{ secrets.RUN_START_MESSAGE_TEMPLATE }}
+        DISPLAY_TIMEZONE: ${{ secrets.DISPLAY_TIMEZONE || 'Asia/Kolkata' }}
       run: |
         python -u alert_app.py
 
@@ -69,5 +72,10 @@ jobs:
           echo "alert.log not found"
         fi
 
-
-
+    - name: Upload app log artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: alert-log
+        path: alert.log
+        if-no-files-found: warn
