@@ -42,10 +42,10 @@ All sensitive values (bot token, chat ID, email password) are stored **outside t
 | `TELEGRAM_CHAT_ID` | ✅ Yes | — | Your Telegram chat/group ID |
 | `EMAIL_ADDRESS` | Optional | — | Gmail address for daily summary |
 | `EMAIL_PASSWORD` | Optional | — | Gmail App Password (not your login password) |
-| `EXECUTION_START_TIME` | Optional | `08:00` | App execution start time (HH:MM, UTC); startup signal is sent here |
-| `EXECUTION_STOP_TIME` | Optional | `16:00` | App execution stop time (HH:MM, UTC); daily summary can be sent here |
-| `ALERT_WINDOW_START_TIME` | Optional | `09:30` | Alert window start (HH:MM, UTC) |
-| `ALERT_WINDOW_END_TIME` | Optional | `15:30` | Alert window end (HH:MM, UTC) |
+| `EXECUTION_START_TIME` | Optional | `08:00` | App execution start time (HH:MM, **in DISPLAY_TIMEZONE**); startup signal is sent here |
+| `EXECUTION_STOP_TIME` | Optional | `16:00` | App execution stop time (HH:MM, **in DISPLAY_TIMEZONE**); daily summary can be sent here |
+| `ALERT_WINDOW_START_TIME` | Optional | `09:30` | Alert window start (HH:MM, **in DISPLAY_TIMEZONE**) |
+| `ALERT_WINDOW_END_TIME` | Optional | `15:30` | Alert window end (HH:MM, **in DISPLAY_TIMEZONE**) |
 | `ALERT_INTERVAL_MINUTES` | Optional | `60` | Alert interval in minutes |
 | `STARTUP_SIGNAL_TEMPLATE` | Optional | built-in default | Startup message template (`{timestamp}`, `{execution_start}`, `{execution_stop}`, `{alert_start}`, `{alert_end}`) |
 | `ALERT_MESSAGE_TEMPLATE` | Optional | built-in default | Alert message template (`{timestamp}`) |
@@ -53,8 +53,9 @@ All sensitive values (bot token, chat ID, email password) are stored **outside t
 | `DISPLAY_TIMEZONE` | Optional | `Asia/Kolkata` | Timezone used in message timestamps (example: `Asia/Kolkata`) |
 | `MANUAL_TEST_MODE` | Optional | `false` | When `true`, sends immediate test Telegram signal and exits |
 | `MANUAL_TEST_MESSAGE_TEMPLATE` | Optional | built-in default | Manual test message template (`{timestamp}`) |
-| `NOTIFY_ON_EACH_RUN_START` | Optional | `false` | When `true`, sends a Telegram message at the start of every run (useful to confirm deployment/run trigger) |
+| `NOTIFY_ON_EACH_RUN_START` | Optional | `false` | When `true`, sends a Telegram message at the start of every run (can look like duplicate "run started" messages if runs happen outside alert slots) |
 | `RUN_START_MESSAGE_TEMPLATE` | Optional | built-in default | Run-start message template (`{timestamp}`) |
+| `SLOT_TOLERANCE_MINUTES` | Optional | `10` | Schedule tolerance in minutes for startup/alert/summary matching (helps when GitHub schedule starts a few minutes late) |
 | `LOCAL_CONTINUOUS_MODE` | Optional | `false` | For local runs only: keep process alive and evaluate schedule continuously |
 | `LOCAL_LOOP_SLEEP_SECONDS` | Optional | `5` | Local loop polling interval in seconds |
 
@@ -82,10 +83,18 @@ For local continuous testing, set `LOCAL_CONTINUOUS_MODE=true` in [.env](github_
 
 ## 🧠 Terminology (important)
 
-- **Execution window** = when GitHub Actions starts this job from cron in [github_actions/.github/workflows/deploy.yml](github_actions/.github/workflows/deploy.yml) and when the app accepts processing (`EXECUTION_START_TIME` to `EXECUTION_STOP_TIME`).
+- **Time windows** = All configured times (`EXECUTION_START_TIME`, `EXECUTION_STOP_TIME`, `ALERT_WINDOW_START_TIME`, `ALERT_WINDOW_END_TIME`) are interpreted in `DISPLAY_TIMEZONE` (default `Asia/Kolkata` = IST). Set times as IST directly — no UTC conversion needed.
+- **Execution window** = when the app accepts processing (`EXECUTION_START_TIME` to `EXECUTION_STOP_TIME`).
 - **Alert window** = app logic (`ALERT_WINDOW_START_TIME` to `ALERT_WINDOW_END_TIME`) inside [github_actions/alert_app.py](github_actions/alert_app.py).
+- **Cron schedule** = defined in [github_actions/.github/workflows/deploy.yml](github_actions/.github/workflows/deploy.yml) in **UTC**. Must be kept in sync with your window times converted to UTC.
 
-These can be different; best practice is to keep them aligned.
+> ⚠️ If you change `DISPLAY_TIMEZONE`, also update the cron schedule in `deploy.yml` to match.
+
+| IST time | UTC equivalent | Cron entry | Purpose |
+|---|---|---|---|
+| 08:00 AM | 02:30 AM | `30 2 * * *` | Startup signal |
+| 09:30–15:30 hourly | 04:00–10:00 hourly | `0 4-10 * * *` | Hourly alerts |
+| 04:00 PM | 10:30 AM | `30 10 * * *` | Daily summary |
 
 ---
 
@@ -136,6 +145,7 @@ GitHub Actions reads credentials from **Secrets**, not from `.env`.
     | `MANUAL_TEST_MESSAGE_TEMPLATE` | optional message template |
     | `NOTIFY_ON_EACH_RUN_START` | `true` / `false` |
     | `RUN_START_MESSAGE_TEMPLATE` | optional message template |
+    | `SLOT_TOLERANCE_MINUTES` | e.g. `10` |
     | `LOCAL_CONTINUOUS_MODE` | `true` / `false` (local only) |
     | `LOCAL_LOOP_SLEEP_SECONDS` | polling seconds (local only) |
 
@@ -157,15 +167,15 @@ Manual execution supports a one-click input named `manual_test_mode`. When set t
 
 The scheduled demo uses cron entries so GitHub Actions starts the job only at required times (UTC), and each run exits cleanly.
 
-Behavior by hour (default setup):
-- `08:00` → sends startup Telegram signal.
-- `09:30` to `15:30` → sends alert(s) based on `ALERT_INTERVAL_MINUTES`.
-- `16:00` → sends daily summary email (if email creds exist).
+Behavior by time (default IST setup):
+- `08:00 AM IST` → startup signal ("run started").
+- `09:30 AM to 03:30 PM IST` → hourly alerts based on `ALERT_INTERVAL_MINUTES`.
+- `04:00 PM IST` → daily summary email (if email creds exist).
 
-Default cron timing is configured as:
-- `0 8 * * *` (startup)
-- `30 9-15 * * *` (hourly alerts at `:30`)
-- `0 16 * * *` (summary)
+Default cron timing is configured as IST-equivalent UTC:
+- `30 2 * * *` (UTC) → 08:00 AM IST startup
+- `0 4-10 * * *` (UTC) → 09:30 AM–03:30 PM IST hourly alerts
+- `30 10 * * *` (UTC) → 04:00 PM IST summary
 
 ---
 
@@ -177,3 +187,5 @@ Default cron timing is configured as:
 - **GitHub Actions logs** – Go to repo → **Actions** tab → click a workflow run → expand each step.
 - **Downloaded app log** – In the same run page, download artifact named `alert-log`.
 - **Daily summary** – At the end hour, the app creates a summary from the configured alert schedule and sends it by email when email secrets are provided.
+
+

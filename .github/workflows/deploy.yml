@@ -12,13 +12,19 @@ on:
           - 'false'
           - 'true'
   schedule:
-    # UTC schedules:
-    # 08:00 -> startup signal
-    - cron: '0 8 * * *'
-    # 09:30, 10:30, ..., 15:30 -> hourly alerts
-    - cron: '30 9-15 * * *'
-    # 16:00 -> daily summary
-    - cron: '0 16 * * *'
+    # All times below are UTC equivalents of IST (Asia/Kolkata = UTC+5:30).
+    #
+    # IMPORTANT:
+    # GitHub scheduled workflows can be delayed more on crowded minute marks (like :00 and :30).
+    # To reduce jitter, we intentionally run 2 minutes after each logical slot and use
+    # SLOT_TOLERANCE_MINUTES in app logic to still match the intended slot.
+    #
+    # Logical slot: IST 08:00 AM startup  -> UTC 02:30, trigger at 02:32
+    - cron: '32 2 * * *'
+    # Logical slots: IST 09:30..15:30 hourly -> UTC 04:00..10:00, trigger at :02
+    - cron: '2 4-10 * * *'
+    # Logical slot: IST 04:00 PM summary -> UTC 10:30, trigger at 10:32
+    - cron: '32 10 * * *'
 
 jobs:
   build:
@@ -59,6 +65,7 @@ jobs:
         NOTIFY_ON_EACH_RUN_START: ${{ secrets.NOTIFY_ON_EACH_RUN_START }}
         RUN_START_MESSAGE_TEMPLATE: ${{ secrets.RUN_START_MESSAGE_TEMPLATE }}
         DISPLAY_TIMEZONE: ${{ secrets.DISPLAY_TIMEZONE || 'Asia/Kolkata' }}
+        SLOT_TOLERANCE_MINUTES: ${{ secrets.SLOT_TOLERANCE_MINUTES || '10' }}
       run: |
         python -u alert_app.py
 
