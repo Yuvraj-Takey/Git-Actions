@@ -12,19 +12,12 @@ on:
           - 'false'
           - 'true'
   schedule:
-    # All times below are UTC equivalents of IST (Asia/Kolkata = UTC+5:30).
-    #
-    # IMPORTANT:
-    # GitHub scheduled workflows can be delayed more on crowded minute marks (like :00 and :30).
-    # To reduce jitter, we intentionally run 2 minutes after each logical slot and use
-    # SLOT_TOLERANCE_MINUTES in app logic to still match the intended slot.
-    #
-    # Logical slot: IST 08:00 AM startup  -> UTC 02:30, trigger at 02:32
-    - cron: '32 2 * * *'
-    # Logical slots: IST 09:30..15:30 hourly -> UTC 04:00..10:00, trigger at :02
-    - cron: '2 4-10 * * *'
-    # Logical slot: IST 04:00 PM summary -> UTC 10:30, trigger at 10:32
-    - cron: '32 10 * * *'
+    # Frequent schedule (UTC) for India market window only (Mon-Fri).
+    # IST 09:00-15:30 == UTC 03:30-10:00.
+    # Runs every 15 minutes in this window; app sends only due market-hour slots.
+    - cron: '30,45 3 * * 1-5'
+    - cron: '*/15 4-9 * * 1-5'
+    - cron: '0 10 * * 1-5'
 
 jobs:
   build:
@@ -52,20 +45,21 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        ALERT_INTERVAL_MINUTES: ${{ secrets.ALERT_INTERVAL_MINUTES }}
-        ALERT_WINDOW_START_TIME: ${{ secrets.ALERT_WINDOW_START_TIME }}
-        ALERT_WINDOW_END_TIME: ${{ secrets.ALERT_WINDOW_END_TIME }}
-        EXECUTION_START_TIME: ${{ secrets.EXECUTION_START_TIME }}
-        EXECUTION_STOP_TIME: ${{ secrets.EXECUTION_STOP_TIME }}
+        ALERT_INTERVAL_MINUTES: ${{ secrets.ALERT_INTERVAL_MINUTES || '60' }}
+        ALERT_WINDOW_START_TIME: ${{ secrets.ALERT_WINDOW_START_TIME || '09:00' }}
+        ALERT_WINDOW_END_TIME: ${{ secrets.ALERT_WINDOW_END_TIME || '15:30' }}
+        EXECUTION_START_TIME: ${{ secrets.EXECUTION_START_TIME || '09:00' }}
+        EXECUTION_STOP_TIME: ${{ secrets.EXECUTION_STOP_TIME || '15:30' }}
         STARTUP_SIGNAL_TEMPLATE: ${{ secrets.STARTUP_SIGNAL_TEMPLATE }}
         ALERT_MESSAGE_TEMPLATE: ${{ secrets.ALERT_MESSAGE_TEMPLATE }}
         SUMMARY_SUBJECT_TEMPLATE: ${{ secrets.SUMMARY_SUBJECT_TEMPLATE }}
         MANUAL_TEST_MODE: ${{ github.event.inputs.manual_test_mode || secrets.MANUAL_TEST_MODE }}
         MANUAL_TEST_MESSAGE_TEMPLATE: ${{ secrets.MANUAL_TEST_MESSAGE_TEMPLATE }}
-        NOTIFY_ON_EACH_RUN_START: ${{ secrets.NOTIFY_ON_EACH_RUN_START }}
+        NOTIFY_ON_EACH_RUN_START: 'false'
         RUN_START_MESSAGE_TEMPLATE: ${{ secrets.RUN_START_MESSAGE_TEMPLATE }}
         DISPLAY_TIMEZONE: ${{ secrets.DISPLAY_TIMEZONE || 'Asia/Kolkata' }}
-        SLOT_TOLERANCE_MINUTES: ${{ secrets.SLOT_TOLERANCE_MINUTES || '10' }}
+        SLOT_TOLERANCE_MINUTES: ${{ secrets.SLOT_TOLERANCE_MINUTES || '14' }}
+        MAX_CATCHUP_MINUTES: ${{ secrets.MAX_CATCHUP_MINUTES || '14' }}
       run: |
         python -u alert_app.py
 
@@ -86,3 +80,5 @@ jobs:
         name: alert-log
         path: alert.log
         if-no-files-found: warn
+
+

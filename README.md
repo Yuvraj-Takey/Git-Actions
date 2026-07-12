@@ -1,6 +1,6 @@
 # GitHub Actions – Alert Bot Demo
 
-A simple Python application that sends a startup Telegram signal, sends Telegram alerts in a configured alert window, and can email a daily summary. The app is designed as a GitHub Actions demo using a scheduled workflow, which is the correct approach for CI/CD jobs that should run and exit.
+A simple Python application that sends Telegram alerts only during configured market hours. It is designed for GitHub Actions scheduled runs, with frequent triggers and in-app slot matching for high reliability.
 
 ---
 
@@ -42,24 +42,32 @@ All sensitive values (bot token, chat ID, email password) are stored **outside t
 | `TELEGRAM_CHAT_ID` | ✅ Yes | — | Your Telegram chat/group ID |
 | `EMAIL_ADDRESS` | Optional | — | Gmail address for daily summary |
 | `EMAIL_PASSWORD` | Optional | — | Gmail App Password (not your login password) |
-| `EXECUTION_START_TIME` | Optional | `08:00` | App execution start time (HH:MM, **in DISPLAY_TIMEZONE**); startup signal is sent here |
-| `EXECUTION_STOP_TIME` | Optional | `16:00` | App execution stop time (HH:MM, **in DISPLAY_TIMEZONE**); daily summary can be sent here |
-| `ALERT_WINDOW_START_TIME` | Optional | `09:30` | Alert window start (HH:MM, **in DISPLAY_TIMEZONE**) |
+| `EXECUTION_START_TIME` | Optional | `09:00` | App execution start time (HH:MM, **in DISPLAY_TIMEZONE**) |
+| `EXECUTION_STOP_TIME` | Optional | `15:30` | App execution stop time (HH:MM, **in DISPLAY_TIMEZONE**) |
+| `ALERT_WINDOW_START_TIME` | Optional | `09:00` | Alert window start (HH:MM, **in DISPLAY_TIMEZONE**) |
 | `ALERT_WINDOW_END_TIME` | Optional | `15:30` | Alert window end (HH:MM, **in DISPLAY_TIMEZONE**) |
 | `ALERT_INTERVAL_MINUTES` | Optional | `60` | Alert interval in minutes |
-| `STARTUP_SIGNAL_TEMPLATE` | Optional | built-in default | Startup message template (`{timestamp}`, `{execution_start}`, `{execution_stop}`, `{alert_start}`, `{alert_end}`) |
+| `STARTUP_SIGNAL_TEMPLATE` | Optional | built-in default | Kept for backward compatibility; not used in market-alert-only scheduled mode |
 | `ALERT_MESSAGE_TEMPLATE` | Optional | built-in default | Alert message template (`{timestamp}`) |
-| `SUMMARY_SUBJECT_TEMPLATE` | Optional | built-in default | Email summary subject template (`{date}`) |
+| `SUMMARY_SUBJECT_TEMPLATE` | Optional | built-in default | Kept for backward compatibility |
 | `DISPLAY_TIMEZONE` | Optional | `Asia/Kolkata` | Timezone used in message timestamps (example: `Asia/Kolkata`) |
 | `MANUAL_TEST_MODE` | Optional | `false` | When `true`, sends immediate test Telegram signal and exits |
 | `MANUAL_TEST_MESSAGE_TEMPLATE` | Optional | built-in default | Manual test message template (`{timestamp}`) |
 | `NOTIFY_ON_EACH_RUN_START` | Optional | `false` | When `true`, sends a Telegram message at the start of every run (can look like duplicate "run started" messages if runs happen outside alert slots) |
 | `RUN_START_MESSAGE_TEMPLATE` | Optional | built-in default | Run-start message template (`{timestamp}`) |
-| `SLOT_TOLERANCE_MINUTES` | Optional | `10` | Schedule tolerance in minutes for startup/alert/summary matching (helps when GitHub schedule starts a few minutes late) |
+| `SLOT_TOLERANCE_MINUTES` | Optional | `14` | Delay window in minutes for due alert slot matching |
+| `MAX_CATCHUP_MINUTES` | Optional | `14` | Upper bound for delayed alert processing (use same value as `SLOT_TOLERANCE_MINUTES`) |
 | `LOCAL_CONTINUOUS_MODE` | Optional | `false` | For local runs only: keep process alive and evaluate schedule continuously |
 | `LOCAL_LOOP_SLEEP_SECONDS` | Optional | `5` | Local loop polling interval in seconds |
 
-At runtime the app decides whether the current scheduled run is an alert slot or the end-of-day summary slot.
+At runtime the app sends only due interval alerts inside market hours.
+
+Template placeholders available in Telegram templates:
+- `{timestamp}` (same as actual run time, backward compatible)
+- `{actual_run_time}`
+- `{scheduled_slot_time}`
+- `{scheduled_slot_timestamp}`
+- `{display_timezone}`
 
 ---
 
@@ -73,7 +81,7 @@ At runtime the app decides whether the current scheduled run is an alert slot or
 4. Commit and push everything **except** `.env`.
 5. In GitHub, add repository secrets (same key names as in `.env`).
 6. Run the workflow once from **Actions → Deploy Python Application → Run workflow**.
-7. Confirm the run logs and check Telegram for the startup signal.
+7. Confirm the run logs and check Telegram for market-hour alerts.
 
 For immediate manual testing, run workflow with `manual_test_mode=true` in the workflow dispatch form.
 
@@ -146,6 +154,7 @@ GitHub Actions reads credentials from **Secrets**, not from `.env`.
     | `NOTIFY_ON_EACH_RUN_START` | `true` / `false` |
     | `RUN_START_MESSAGE_TEMPLATE` | optional message template |
     | `SLOT_TOLERANCE_MINUTES` | e.g. `10` |
+    | `MAX_CATCHUP_MINUTES` | e.g. `75` |
     | `LOCAL_CONTINUOUS_MODE` | `true` / `false` (local only) |
     | `LOCAL_LOOP_SLEEP_SECONDS` | polling seconds (local only) |
 
@@ -168,14 +177,13 @@ Manual execution supports a one-click input named `manual_test_mode`. When set t
 The scheduled demo uses cron entries so GitHub Actions starts the job only at required times (UTC), and each run exits cleanly.
 
 Behavior by time (default IST setup):
-- `08:00 AM IST` → startup signal ("run started").
-- `09:30 AM to 03:30 PM IST` → hourly alerts based on `ALERT_INTERVAL_MINUTES`.
-- `04:00 PM IST` → daily summary email (if email creds exist).
+- `09:00 AM to 03:30 PM IST` → interval alerts based on `ALERT_INTERVAL_MINUTES`.
+- No startup ping and no after-hours scheduled alert sends.
 
-Default cron timing is configured as IST-equivalent UTC:
-- `30 2 * * *` (UTC) → 08:00 AM IST startup
-- `0 4-10 * * *` (UTC) → 09:30 AM–03:30 PM IST hourly alerts
-- `30 10 * * *` (UTC) → 04:00 PM IST summary
+Default cron timing is configured as IST-equivalent UTC, every 15 minutes on weekdays within market window:
+- `30,45 3 * * 1-5` (UTC)
+- `*/15 4-9 * * 1-5` (UTC)
+- `0 10 * * 1-5` (UTC)
 
 ---
 
@@ -186,6 +194,6 @@ Default cron timing is configured as IST-equivalent UTC:
 - **Logs** – Alerts are logged to `alert.log` (excluded from Git by `.gitignore`).
 - **GitHub Actions logs** – Go to repo → **Actions** tab → click a workflow run → expand each step.
 - **Downloaded app log** – In the same run page, download artifact named `alert-log`.
-- **Daily summary** – At the end hour, the app creates a summary from the configured alert schedule and sends it by email when email secrets are provided.
+- **No message sent** – If a run is outside market window or no slot is due yet, app logs a no-op line and exits.
 
 

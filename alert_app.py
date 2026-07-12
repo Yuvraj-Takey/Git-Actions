@@ -32,6 +32,7 @@ CFG_LOCAL_CONTINUOUS_MODE = 'LOCAL_CONTINUOUS_MODE'
 CFG_LOCAL_LOOP_SLEEP_SECONDS = 'LOCAL_LOOP_SLEEP_SECONDS'
 CFG_DISPLAY_TIMEZONE = 'DISPLAY_TIMEZONE'
 CFG_SLOT_TOLERANCE_MINUTES = 'SLOT_TOLERANCE_MINUTES'
+CFG_MAX_CATCHUP_MINUTES = 'MAX_CATCHUP_MINUTES'
 
 # Backward compatibility keys (hour-only values from previous version).
 CFG_OLD_EXECUTION_START_HOUR = 'EXECUTION_START_HOUR'
@@ -43,6 +44,7 @@ CFG_OLD_ALERT_INTERVAL_HOURS = 'ALERT_INTERVAL_HOURS'
 # Defaults used when env vars are not provided.
 DEFAULT_LOCAL_CONTINUOUS_MODE = False
 DEFAULT_LOCAL_LOOP_SLEEP_SECONDS = 5
+DEFAULT_MAX_CATCHUP_MINUTES = 75
 
 # Text template config keys.
 CFG_STARTUP_SIGNAL_TEMPLATE = 'STARTUP_SIGNAL_TEMPLATE'
@@ -54,11 +56,11 @@ CFG_RUN_START_MESSAGE_TEMPLATE = 'RUN_START_MESSAGE_TEMPLATE'
 
 # Default startup message (sent at execution start slot).
 DEFAULT_STARTUP_SIGNAL_TEMPLATE = (
-    '✅ Alert app started at {timestamp} | execution window: {execution_start}-{execution_stop} | '
-    'alert window: {alert_start}-{alert_end}'
+    '✅ Startup scheduled at {scheduled_slot_timestamp} | sent at {actual_run_time} | '
+    'execution window: {execution_start}-{execution_stop} | alert window: {alert_start}-{alert_end}'
 )
 # Default alert message (sent for each alert slot).
-DEFAULT_ALERT_MESSAGE_TEMPLATE = 'Alert at {timestamp}'
+DEFAULT_ALERT_MESSAGE_TEMPLATE = 'Alert scheduled at {scheduled_slot_timestamp} | sent at {actual_run_time}'
 # Default email subject for daily summary.
 DEFAULT_SUMMARY_SUBJECT_TEMPLATE = 'Daily Alert Summary - {date}'
 # Default manual test message.
@@ -180,6 +182,12 @@ def _load_config():
     except ValueError as exc:
         raise ValueError(f'{CFG_SLOT_TOLERANCE_MINUTES} must be an integer. Got: {slot_tolerance_raw}') from exc
 
+    max_catchup_raw = _env(CFG_MAX_CATCHUP_MINUTES, str(DEFAULT_MAX_CATCHUP_MINUTES)).strip()
+    try:
+        max_catchup_minutes = int(max_catchup_raw)
+    except ValueError as exc:
+        raise ValueError(f'{CFG_MAX_CATCHUP_MINUTES} must be an integer. Got: {max_catchup_raw}') from exc
+
     # Build one normalized config object used by all runtime functions.
     return {
         'telegram_chat_id': _env(CFG_TELEGRAM_CHAT_ID).strip(),  # Telegram target chat.
@@ -204,6 +212,7 @@ def _load_config():
         'local_loop_sleep_seconds': int(_env(CFG_LOCAL_LOOP_SLEEP_SECONDS, str(DEFAULT_LOCAL_LOOP_SLEEP_SECONDS))),  # Local loop sleep.
         'display_timezone': _required_env(CFG_DISPLAY_TIMEZONE),  # Display/compare timezone.
         'slot_tolerance_minutes': slot_tolerance_minutes,  # Tolerance for delayed scheduler runs.
+        'max_catchup_minutes': max_catchup_minutes,  # Max delay (minutes) to still process missed slots.
     }
 
 
@@ -231,6 +240,9 @@ def _validate_config(config):
     if config['slot_tolerance_minutes'] < 0:
         raise ValueError(f'{CFG_SLOT_TOLERANCE_MINUTES} must be greater than or equal to 0')
 
+    if config['max_catchup_minutes'] < 0:
+        raise ValueError(f'{CFG_MAX_CATCHUP_MINUTES} must be greater than or equal to 0')
+
     try:
         ZoneInfo(config['display_timezone'])  # Validate timezone string.
     except Exception as exc:
@@ -242,11 +254,11 @@ def _validate_config(config):
     alert_start_min = _minutes_since_midnight(config['alert_start'])
     alert_end_min = _minutes_since_midnight(config['alert_end'])
 
-    # Ensure execution start < alert start <= alert end < execution stop.
-    if not (execution_start_min < alert_start_min <= alert_end_min < execution_stop_min):
+    # Ensure alert window is fully inside execution window.
+    if not (execution_start_min <= alert_start_min <= alert_end_min <= execution_stop_min):
         raise ValueError(
-            f'Expected {CFG_EXECUTION_START_TIME} < {CFG_ALERT_WINDOW_START_TIME} <= '
-            f'{CFG_ALERT_WINDOW_END_TIME} < {CFG_EXECUTION_STOP_TIME}'
+            f'Expected {CFG_EXECUTION_START_TIME} <= {CFG_ALERT_WINDOW_START_TIME} <= '
+            f'{CFG_ALERT_WINDOW_END_TIME} <= {CFG_EXECUTION_STOP_TIME}'
         )
 
 
@@ -339,6 +351,26 @@ def _is_alert_slot_with_tolerance(current_time, alert_start, interval_minutes, t
     return remainder <= tolerance_minutes or (interval_minutes - remainder) <= tolerance_minutes
 
 
+def _find_latest_slot_at_or_before(current_time, window_start, window_end, interval_minutes):
+    """Return latest valid slot <= current_time within [window_start, window_end], else None."""
+    current_minutes = _minutes_since_midnight(current_time)
+    start_minutes = _minutes_since_midnight(window_start)
+    end_minutes = _minutes_since_midnight(window_end)
+
+    if current_minutes < start_minutes:
+        return None
+
+    bounded_current = min(current_minutes, end_minutes)
+    elapsed = bounded_current - start_minutes
+    steps = elapsed // interval_minutes
+    slot_minutes = start_minutes + (steps * interval_minutes)
+
+    if slot_minutes < start_minutes or slot_minutes > end_minutes:
+        return None
+
+    return time(hour=slot_minutes // 60, minute=slot_minutes % 60)
+
+
 def _build_daily_summary(config, run_date):
     """Generate list of scheduled alert timestamps for the day."""
     alert_start_minutes = _minutes_since_midnight(config['alert_start'])  # Start offset.
@@ -366,11 +398,28 @@ def _display_timestamp(now_utc, config):
     return _display_datetime(now_utc, config).strftime(TIMESTAMP_FORMAT)
 
 
-def _process_scheduled_logic(config, now):
-    """Process one scheduled run and execute at most one action.
+def _build_message_context(config, now_utc, scheduled_time=None):
+    """Build common template fields for Telegram messages."""
+    timezone_name = config['display_timezone']
+    now_local = _display_datetime(now_utc, config)
+    scheduled_dt = None
+    if scheduled_time is not None:
+        scheduled_dt = datetime.combine(now_local.date(), scheduled_time, tzinfo=ZoneInfo(timezone_name))
 
-    All time-window comparisons are done in DISPLAY_TIMEZONE (default Asia/Kolkata)
-    so values in .env (e.g. 08:00, 09:30) are treated as local IST times, not UTC.
+    return {
+        'timestamp': now_local.strftime(TIMESTAMP_FORMAT),  # Backward-compatible field.
+        'actual_run_time': now_local.strftime(TIMESTAMP_FORMAT),
+        'scheduled_slot_time': scheduled_time.strftime(TIME_FORMAT) if scheduled_time else '',
+        'scheduled_slot_timestamp': scheduled_dt.strftime(TIMESTAMP_FORMAT) if scheduled_dt else '',
+        'display_timezone': timezone_name,
+    }
+
+
+def _process_scheduled_logic(config, now):
+    """Process one scheduled run for market-hour alerts only.
+
+    Scheduled mode intentionally sends only interval alerts inside market hours.
+    Startup/run-start/summary signals are not emitted to avoid noisy Telegram logs.
     """
     # Compare in display timezone – configured times (08:00, 09:30 …) are local IST, not UTC.
     now_local = _display_datetime(now, config)
@@ -382,6 +431,9 @@ def _process_scheduled_logic(config, now):
     alert_start = config['alert_start']
     alert_end = config['alert_end']
     tolerance_minutes = config['slot_tolerance_minutes']
+    max_catchup_minutes = config['max_catchup_minutes']
+    effective_slot_delay_limit = min(tolerance_minutes, max_catchup_minutes)
+    now_minutes = _minutes_since_midnight(now_time)
 
     # If current time is outside execution window, do nothing.
     if not _is_inclusive_window(now_time, execution_start, execution_stop):
@@ -394,63 +446,41 @@ def _process_scheduled_logic(config, now):
         )
         return
 
-    # Startup branch: at execution start slot (with tolerance).
-    if _is_exact_or_tolerant_match(now_time, execution_start, tolerance_minutes):
-        startup_message = config['startup_template'].format(
-            timestamp=_display_timestamp(now, config),
-            execution_start=execution_start.strftime(TIME_FORMAT),
-            execution_stop=execution_stop.strftime(TIME_FORMAT),
-            alert_start=alert_start.strftime(TIME_FORMAT),
-            alert_end=alert_end.strftime(TIME_FORMAT),
-        )
-        send_telegram_alert(config, startup_message)
-        logging.info(
-            'Startup signal processed. now_local=%s target=%s tolerance=%s min (%s)',
-            now_time.strftime(TIME_FORMAT),
-            execution_start.strftime(TIME_FORMAT),
-            tolerance_minutes,
-            config['display_timezone'],
-        )
-        return
-
-    # Stop branch: at execution stop slot (with tolerance), send summary email.
-    if _is_exact_or_tolerant_match(now_time, execution_stop, tolerance_minutes):
-        summary_messages = _build_daily_summary(config, _display_datetime(now, config).date())
-        logging.info(
-            'Execution stop slot reached; sending daily summary if configured. now_local=%s target=%s tolerance=%s min (%s)',
-            now_time.strftime(TIME_FORMAT),
-            execution_stop.strftime(TIME_FORMAT),
-            tolerance_minutes,
-            config['display_timezone'],
-        )
-        send_daily_summary(config, summary_messages, _display_datetime(now, config).date())
-        return
-
-    # Alert branch: inside alert window and on a valid interval slot.
-    if _is_inclusive_window_with_tolerance(now_time, alert_start, alert_end, tolerance_minutes) and _is_alert_slot_with_tolerance(
+    # Alert branch: process latest alert slot at/before run time inside market hours.
+    latest_slot = _find_latest_slot_at_or_before(
         now_time,
         alert_start,
+        alert_end,
         config['interval_minutes'],
-        tolerance_minutes,
-    ):
-        alert_message = config['alert_template'].format(timestamp=_display_timestamp(now, config))
+    )
+    if latest_slot is not None:
+        latest_slot_minutes = _minutes_since_midnight(latest_slot)
+        alert_delay = now_minutes - latest_slot_minutes
+    else:
+        alert_delay = None
+
+    if latest_slot is not None and alert_delay is not None and 0 <= alert_delay <= effective_slot_delay_limit:
+        alert_context = _build_message_context(config, now, latest_slot)
+        alert_message = config['alert_template'].format(**alert_context)
         send_telegram_alert(config, alert_message)
         logging.info(
-            'Alert slot processed. now_local=%s alert_window=%s-%s interval=%s min tolerance=%s min (%s)',
+            'Alert slot processed. now_local=%s slot=%s delay=%s min alert_window=%s-%s interval=%s min delay_limit=%s min (%s)',
             now_time.strftime(TIME_FORMAT),
+            latest_slot.strftime(TIME_FORMAT),
+            alert_delay,
             alert_start.strftime(TIME_FORMAT),
             alert_end.strftime(TIME_FORMAT),
             config['interval_minutes'],
-            tolerance_minutes,
+            effective_slot_delay_limit,
             config['display_timezone'],
         )
         return
 
     # If none of the above branches matched, this run is a no-op.
     logging.info(
-        'Inside execution window, but not a startup/summary/alert slot. now_local=%s tolerance=%s min (%s)',
+        'Inside execution window, but no due alert slot. now_local=%s delay_limit=%s min (%s)',
         now_time.strftime(TIME_FORMAT),
-        tolerance_minutes,
+        effective_slot_delay_limit,
         config['display_timezone'],
     )
 
@@ -477,14 +507,14 @@ def main():
     """One-shot run for scheduled CI execution.
 
     The job is expected to run on the configured cron schedule. Based on current UTC time,
-    this function decides whether to send startup signal, alert, summary, or no-op.
+    this function decides whether to send a market-hour alert slot or no-op.
     """
     config = _load_config()  # Load and normalize all env values.
     _validate_config(config)  # Fail fast if config has missing/invalid values.
 
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)  # Current UTC minute.
     logging.info(
-        'Run context: utc_now=%s display_now=%s execution=%s-%s alert=%s-%s interval=%s min tolerance=%s min',
+        'Run context: utc_now=%s display_now=%s execution=%s-%s alert=%s-%s interval=%s min tolerance=%s min catchup=%s min',
         now.strftime(TIMESTAMP_FORMAT),
         _display_timestamp(now, config),
         config['execution_start'].strftime(TIME_FORMAT),
@@ -493,20 +523,14 @@ def main():
         config['alert_end'].strftime(TIME_FORMAT),
         config['interval_minutes'],
         config['slot_tolerance_minutes'],
+        config['max_catchup_minutes'],
     )
-
-    # Optional run-start ping: sends once at the beginning of every workflow run.
-    if config['notify_on_each_run_start'] and not config['manual_test_mode']:
-        run_start_message = config['run_start_template'].format(
-            timestamp=_display_timestamp(now, config),
-        )
-        send_telegram_alert(config, run_start_message)
-        logging.info('Run-start signal processed.')
 
     # Manual-test mode: bypass schedule and send a test message immediately.
     if config['manual_test_mode']:
+        manual_context = _build_message_context(config, now)
         manual_test_message = config['manual_test_template'].format(
-            timestamp=_display_timestamp(now, config),
+            **manual_context,
         )
         sent = send_telegram_alert(config, manual_test_message)
         if not sent:
