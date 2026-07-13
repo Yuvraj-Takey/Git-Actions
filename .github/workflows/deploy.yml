@@ -4,115 +4,73 @@ on:
   workflow_dispatch:
     inputs:
       manual_test_mode:
-        description: 'Send immediate Telegram test signal and exit (bypasses window checks)'
+        description: "Send immediate Telegram test signal and exit"
         required: false
-        default: 'false'
+        default: "false"
         type: choice
         options:
-          - 'false'
-          - 'true'
+          - "false"
+          - "true"
   schedule:
-    # 3 lightweight market-day runs (UTC), intentionally off round times to reduce queue congestion.
-    # IST target: 10:07, 12:38, 14:54.
-
-    #    * * * * *
-    #    | | | | |
-    #    | | | | └── Day of Week (0-7)
-    #    | | | └──── Month (1-12)
-    #    | | └────── Day of Month (1-31)
-    #    | └──────── Hour (0-23)
-    #    └────────── Minute (0-59)
-    - cron: '37 4 * * 1-5'   # 10:07 IST
-    - cron: '8 7 * * 1-5'    # 12:38 IST
-    - cron: '24 9 * * 1-5'   # 14:54 IST
+    # IST 10:07, 12:38, 14:54 (Mon-Fri)
+    - cron: "37 4 * * 1-5"
+    - cron: "8 7 * * 1-5"
+    - cron: "24 9 * * 1-5"
 
 jobs:
   build:
-
-    #if: false # to disable the job temporarily
- 
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Python (with pip cache)
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.x'
-        cache: 'pip'
+      - name: Set up Python (with pip cache)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: "pip"
 
-    - name: Log Start Time
-      shell: bash
-      run: |
-        echo "start_utc=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-        echo "start_ist=$(TZ='Asia/Kolkata' date '+%Y-%m-%d %H:%M:%S IST')"
+      - name: Log Start Time
+        shell: bash
+        run: |
+          echo "start_utc=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "start_ist=$(TZ='Asia/Kolkata' date '+%Y-%m-%d %H:%M:%S IST')"
+          echo "event_name=${{ github.event_name }}"
+          echo "event_schedule=${{ github.event.schedule }}"
 
-        if [ -n "${{ github.event.schedule }}" ]; then
-          echo "trigger_cron=${{ github.event.schedule }}"
-          GITHUB_EVENT_SCHEDULE="${{ github.event.schedule }}" python - <<'PY'
-from datetime import datetime, timezone
-import os
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-schedule = os.getenv('GITHUB_EVENT_SCHEDULE', '').strip()
-now = datetime.now(timezone.utc)
-map_hm = {
-    '37 4 * * 1-5': (4, 37),
-    '8 7 * * 1-5': (7, 8),
-    '24 9 * * 1-5': (9, 24),
-}
-if schedule in map_hm:
-    h, m = map_hm[schedule]
-    expected = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    delay_min = int((now - expected).total_seconds() // 60)
-    print(f'expected_utc={expected:%Y-%m-%d %H:%M:%S UTC}')
-    print(f'actual_utc={now:%Y-%m-%d %H:%M:%S UTC}')
-    print(f'start_delay_minutes={delay_min}')
-else:
-    print('start_delay_minutes=NA (manual or unknown schedule)')
-PY
-        else
-          echo "start_delay_minutes=NA (manual run)"
-        fi
+      - name: Run application
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISPLAY_TIMEZONE: ${{ secrets.DISPLAY_TIMEZONE }}
+          MANUAL_TEST_MODE: ${{ github.event.inputs.manual_test_mode }}
+          ALERT_MESSAGE_TEMPLATE: ${{ secrets.ALERT_MESSAGE_TEMPLATE }}
+          MANUAL_TEST_MESSAGE_TEMPLATE: ${{ secrets.MANUAL_TEST_MESSAGE_TEMPLATE }}
+        run: |
+          python -u alert_app.py
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+      - name: Show app log
+        if: always()
+        run: |
+          if [ -f alert.log ]; then
+            echo "--- alert.log ---"
+            cat alert.log
+          else
+            echo "alert.log not found"
+          fi
 
-    - name: Run application
-      env:
-        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        DISPLAY_TIMEZONE: ${{ secrets.DISPLAY_TIMEZONE || 'Asia/Kolkata' }}
-        MANUAL_TEST_MODE: ${{ github.event.inputs.manual_test_mode || 'false' }}
-        ALERT_MESSAGE_TEMPLATE: ${{ secrets.ALERT_MESSAGE_TEMPLATE || '📈 Market ping at {actual_run_time} ({display_timezone})' }}
-        MANUAL_TEST_MESSAGE_TEMPLATE: ${{ secrets.MANUAL_TEST_MESSAGE_TEMPLATE || '🧪 Manual test ping at {actual_run_time} ({display_timezone})' }}
-      run: |
-        python -u alert_app.py
-
-    - name: Show app log
-      if: always()
-      run: |
-        if [ -f alert.log ]; then
-          echo "--- alert.log ---"
-          cat alert.log
-        else
-          echo "alert.log not found"
-        fi
-
-    - name: Upload app log artifact
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: alert-log
-        path: alert.log
-        if-no-files-found: warn
-
-    - name: Show trigger
-      run: |
-        echo "event_name=${{ github.event_name }}"
-        echo "event_schedule=${{ github.event.schedule }}"
+      - name: Upload app log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alert-log
+          path: alert.log
+          if-no-files-found: warn
 
 
